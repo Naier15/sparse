@@ -1,10 +1,10 @@
 print('Start')
-a = 1
-b = 2
-c = 3
-d = 4
+a = 10
+b = 20
+c = 30
+d = 40
 print(a, b, c, d, sep = '\n')
 
 for i in range(5, 10):
-    print(i)
+    print(i * 10)
 print('end')
