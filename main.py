@@ -1,4 +1,5 @@
 import logic
+import domain
 
 print('Start')
 k = 100
@@ -12,4 +13,5 @@ for i in range(5, 10):
     print(i * k)
     
 print(logic.rule1 + logic.rule2 + logic.rule3)
+print(domain.func('example'))
 print('end')
