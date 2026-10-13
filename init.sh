@@ -424,6 +424,7 @@ try {
     # Регистрация вотчеров
     $watches += register_watch (Join-Path $root $src_root) $true
     $state.last_disk_sig = get_disk_sig
+    invoke_sync
 
     $skip_files = [System.Collections.Generic.HashSet[string]]::new([string[]]@("update.pid", "update.stop", "token", "snapshot", "branch", "sparse-checkout"), [System.StringComparer]::OrdinalIgnoreCase)
 
