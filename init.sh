@@ -152,6 +152,7 @@ $snapshot = Join-Path $info "snapshot"
 $token_file = Join-Path $info "token"
 $branch_file = Join-Path $info "branch"
 $pid_file = Join-Path $info "update.pid"
+$stop_file = Join-Path $info "update.stop"
 $log_file = Join-Path $root "log.txt"
 
 $latency_ms = 1000
@@ -449,6 +450,10 @@ if ($null -ne $other) {
     exit 0
 }
 
+if (Test-Path -LiteralPath $stop_file) {
+    Remove-Item -LiteralPath $stop_file -Force -ErrorAction SilentlyContinue
+}
+
 write_text_file $pid_file "$PID"
 $watches = @()
 
@@ -464,10 +469,20 @@ try {
     $watches += register_watch (Join-Path $root $src_root) $true
     $state.last_disk_sig = get_disk_sig
 
-    $skip_files = [System.Collections.Generic.HashSet[string]]::new([string[]]@("update.pid", "token", "snapshot", "branch", "sparse-checkout"), [System.StringComparer]::OrdinalIgnoreCase)
+    $skip_files = [System.Collections.Generic.HashSet[string]]::new([string[]]@("update.pid", "update.stop", "token", "snapshot", "branch", "sparse-checkout"), [System.StringComparer]::OrdinalIgnoreCase)
 
     while ($true) {
+        if (Test-Path -LiteralPath $stop_file) {
+            log "-- STOP REQUESTED --"
+            break
+        }
+
         Start-Sleep -Milliseconds $latency_ms
+
+        if (Test-Path -LiteralPath $stop_file) {
+            log "-- STOP REQUESTED --"
+            break
+        }
 
         # Читаем события из очереди PowerShell
         $events = Get-Event -ErrorAction SilentlyContinue
@@ -525,7 +540,6 @@ try {
     }
 }
 finally {
-    # Очистка без накопления мусора в сессии
     foreach ($watch in $watches) {
         if (-not $watch) { continue }
         foreach ($sub in $watch.subscribers) {
@@ -538,6 +552,9 @@ finally {
     }
     if ((Test-Path $pid_file) -and ((read_text_file $pid_file) -eq "$PID")) {
         Remove-Item $pid_file -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $stop_file) {
+        Remove-Item -LiteralPath $stop_file -Force -ErrorAction SilentlyContinue
     }
 }
 ' > ./.git/hooks/sparse_daemon.ps1
@@ -555,6 +572,7 @@ DAEMON="$WORK_DIR/.git/hooks/sparse_daemon.ps1"
 PID_FILE="$WORK_DIR/.git/info/update.pid"
 LOG_FILE="$WORK_DIR/log.txt"
 START_ERR="$WORK_DIR/.git/info/daemon.err"
+STOP_FILE="$WORK_DIR/.git/info/update.stop"
 
 cd "$WORK_DIR" || { echo "[ERROR] Directory not found: $WORK_DIR"; exit 1; }
 
@@ -594,24 +612,69 @@ get_status() {
     echo ""
 }
 
+wait_gone() {
+    local pid=$1
+    local n=$2
+    local i
+    for i in $(seq 1 "$n"); do
+        pid_alive "$pid" || return 0
+        sleep 0.2
+    done
+    pid_alive "$pid" && return 1
+    return 0
+}
+
+kill_pid() {
+    local pid=$1
+    local force=$2
+    if [[ "$force" != "1" ]]; then
+        kill -TERM "$pid" 2>/dev/null && return 0
+        if command -v taskkill.exe >/dev/null 2>&1; then
+            taskkill.exe //PID "$pid" >/dev/null 2>&1 && return 0
+        fi
+        return 1
+    fi
+    kill -KILL "$pid" 2>/dev/null && return 0
+    if command -v taskkill.exe >/dev/null 2>&1; then
+        taskkill.exe //PID "$pid" //T //F >/dev/null 2>&1 && return 0
+    fi
+    return 1
+}
+
 stop_daemon() {
     local pid
     pid=$(get_status)
-    [[ -z "$pid" ]] && return 0
-
-    if kill "$pid" 2>/dev/null || { command -v taskkill.exe >/dev/null 2>&1 && taskkill.exe //PID "$pid" //F >/dev/null 2>&1; }; then
-        echo "Process $pid stopped"
-    else
-        echo "Failed to stop process $pid"
-        return 1
+    if [[ -z "$pid" ]]; then
+        rm -f "$PID_FILE" "$STOP_FILE"
+        return 0
     fi
 
-    local i
-    for i in {1..10}; do
-        pid_alive "$pid" || break
-        sleep 0.2
-    done
-    rm -f "$PID_FILE"
+    # 1) Ask the daemon to exit the loop so finally disposes FileSystemWatcher
+    : > "$STOP_FILE"
+    if wait_gone "$pid" 25; then
+        echo "Process $pid stopped"
+        rm -f "$PID_FILE" "$STOP_FILE"
+        return 0
+    fi
+
+    # 2) SIGTERM / taskkill without /F
+    kill_pid "$pid" 0
+    if wait_gone "$pid" 15; then
+        echo "Process $pid stopped"
+        rm -f "$PID_FILE" "$STOP_FILE"
+        return 0
+    fi
+
+    # 3) SIGKILL / taskkill /T /F (process tree)
+    kill_pid "$pid" 1
+    if wait_gone "$pid" 10; then
+        echo "Process $pid stopped"
+        rm -f "$PID_FILE" "$STOP_FILE"
+        return 0
+    fi
+
+    echo "Failed to stop process $pid"
+    return 1
 }
 
 start_daemon() {
@@ -633,7 +696,7 @@ start_daemon() {
 
     [[ "$with_log" == "1" ]] && args+=(-Log)
 
-    rm -f "$PID_FILE"
+    rm -f "$PID_FILE" "$STOP_FILE"
     : > "$START_ERR"
 
     nohup "$ps_bin" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$DAEMON" "${args[@]}" >"$START_ERR" 2>&1 &
@@ -673,8 +736,11 @@ run_option() {
             fi 
             ;;
         3) 
-            stop_daemon
-            echo "-- STOPPED --" 
+            if stop_daemon; then
+                echo "-- STOPPED --"
+            else
+                echo "-- STILL WORKING --"
+            fi
             ;;
         [QqЙй]) 
             exit 0 
