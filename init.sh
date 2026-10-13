@@ -308,6 +308,7 @@ function get_already_running {
 }
 
 function invoke_sync {
+    if (Test-Path -LiteralPath $stop_file) { exit 0 }
     if ([datetime]::UtcNow -lt $state.suppress_until) { return }
     if (test_git_busy) {
         Start-Sleep -Milliseconds 300
@@ -536,23 +537,17 @@ if [[ ! -f "$DAEMON" ]]; then
 fi
 
 resolve_powershell() {
-    command -v pwsh || command -v powershell.exe || echo ""
+    command -v powershell.exe || command -v pwsh || echo ""
 }
 
 pid_alive() {
     local pid=$1
     [[ -z "$pid" || "$pid" == "0" ]] && return 1
-    kill -0 "$pid" 2>/dev/null && return 0
-    
-    if command -v tasklist.exe >/dev/null 2>&1; then
-        tasklist.exe //FI "PID eq $pid" 2>/dev/null | grep -q "$pid"
-        return $?
-    fi
-    return 1
+    tasklist.exe //FI "PID eq $pid" //FO CSV //NH 2>/dev/null | grep -qiE "pwsh|powershell"
 }
 
 read_pid_file() {
-    [[ -f "$PID_FILE" ]] && tr -cd '0-9' < "$PID_FILE" 2>/dev/null
+    [[ -f "$PID_FILE" ]] && tr -cd "0-9" < "$PID_FILE" 2>/dev/null
 }
 
 get_status() {
@@ -566,50 +561,51 @@ get_status() {
     echo ""
 }
 
+daemon_running() {
+    local pid=$1
+    [[ -n "$pid" ]] && pid_alive "$pid" && return 0
+    powershell.exe -NoProfile -Command \
+        "if (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*sparse_daemon.ps1*' }) { exit 0 } else { exit 1 }" \
+        >/dev/null 2>&1
+}
+
 wait_gone() {
-    local pid=$1 n=$2 i
+    local n=$1 i
     for i in $(seq 1 "$n"); do
-        pid_alive "$pid" || return 0
+        daemon_running "$(read_pid_file)" || return 0
         sleep 0.2
     done
-    ! pid_alive "$pid"
+    ! daemon_running "$(read_pid_file)"
 }
 
-kill_pid() {
-    local pid=$1 force=$2
-    if [[ "$force" != "1" ]]; then
-        kill -TERM "$pid" 2>/dev/null && return 0
-        command -v taskkill.exe >/dev/null 2>&1 && taskkill.exe //PID "$pid" >/dev/null 2>&1
-        return $?
-    fi
-    kill -KILL "$pid" 2>/dev/null && return 0
-    command -v taskkill.exe >/dev/null 2>&1 && taskkill.exe //PID "$pid" //T //F >/dev/null 2>&1
-    return $?
-}
-
-mark_stopped() {
-    echo "Process $1 stopped"
-    rm -f "$PID_FILE" "$STOP_FILE"
+kill_daemon_processes() {
+    local pid
+    pid=$(read_pid_file)
+    [[ -n "$pid" ]] && taskkill.exe //PID "$pid" //T //F >/dev/null 2>&1
+    powershell.exe -NoProfile -Command \
+        "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*sparse_daemon.ps1*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" \
+        >/dev/null 2>&1
 }
 
 stop_daemon() {
     local pid
-    pid=$(get_status)
-    if [[ -z "$pid" ]]; then
+    pid=$(read_pid_file)
+
+    : > "$STOP_FILE"
+    if wait_gone 25; then
+        echo "Process ${pid:-unknown} stopped"
         rm -f "$PID_FILE" "$STOP_FILE"
         return 0
     fi
 
-    : > "$STOP_FILE"
-    wait_gone "$pid" 25 && { mark_stopped "$pid"; return 0; }
+    kill_daemon_processes
+    if wait_gone 15; then
+        echo "Process ${pid:-unknown} stopped"
+        rm -f "$PID_FILE" "$STOP_FILE"
+        return 0
+    fi
 
-    kill_pid "$pid" 0
-    wait_gone "$pid" 15 && { mark_stopped "$pid"; return 0; }
-
-    kill_pid "$pid" 1
-    wait_gone "$pid" 10 && { mark_stopped "$pid"; return 0; }
-
-    echo "Failed to stop process $pid"
+    echo "Failed to stop sparse daemon ${pid:+(pid $pid)}"
     return 1
 }
 
