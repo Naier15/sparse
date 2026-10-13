@@ -1,10 +1,21 @@
 #!/bin/bash
 work_dir=$(pwd)
-cd "$work_dir"
 git config --global fetch.prune true
 git config --global alias.sc 'sparse-checkout'
 git config --global alias.lg 'log --all --graph --oneline'
 git config --global alias.spa '!f() { case "$1" in "run") ./scripts/sparse.sh 1 ;; "stop") ./scripts/sparse.sh 3 ;; "") ./scripts/sparse.sh 2 ;; *) echo "Wrong parameter: $1" ;; esac }; f'
+
+ask_yn() {
+	local answer
+	while true; do
+		read -r -p "$1 " answer
+		case "$answer" in
+			y|Y) return 0 ;;
+			n|N) return 1 ;;
+		esac
+		echo "Пожалуйста, введите y или n"
+	done
+}
 
 connect_git() {
 	if [ -d "$work_dir"/.git ]; then
@@ -18,21 +29,23 @@ connect_git() {
 	git config --global push.autoSetupRemote true
 	git config --global --add safe.directory "$work_dir"
 
-	while [ 1 ]
-	do
-		read -p "Подключить к IBSO или CRM (1/2): " system
-
-		if [ "$system" = "1" ]; then
-			echo "Подключено к IBSO"
-			git remote add origin git@vld-srvgit01.pskb.ad:dev/IBSO.git
-			break
-		elif [ "$system" = "2" ]; then
-			echo "Подключено к CRM"
-			git remote add origin git@vld-srvgit01.pskb.ad:dev/crm.git
-			break
-		else
-			echo "Пожалуйста, введите номер варианта (1/2)"
-		fi
+	while true; do
+		read -r -p "Подключить к IBSO или CRM (1/2): " system
+		case "$system" in
+			1)
+				echo "Подключено к IBSO"
+				git remote add origin git@vld-srvgit01.pskb.ad:dev/IBSO.git
+				break
+				;;
+			2)
+				echo "Подключено к CRM"
+				git remote add origin git@vld-srvgit01.pskb.ad:dev/crm.git
+				break
+				;;
+			*)
+				echo "Пожалуйста, введите номер варианта (1/2)"
+				;;
+		esac
 	done
 
 	echo ".dbobjects
@@ -54,32 +67,18 @@ init.sh
 log.txt
 " > .gitignore
 
-	while [ 1 ]
-	do
-		read -p "Сгенерировать новый SSH ключ? (y/n) " generate_ssh
-		if [ "$generate_ssh" = "y" ]; then
-		
-			echo -ne "\n" | ssh-keygen -t ed25519
-			echo -ne "\n\n"
-
-			while [ 1 ]
-			do
-				read -p "Выполните следующие шаги:
-	1. Скопируйте публичный ssh ключ C:/Пользователи/Пользователь/.ssh/id_ed25519.pub
+	if ask_yn "Сгенерировать новый SSH ключ? (y/n)"; then
+		echo -ne "\n" | ssh-keygen -t ed25519
+		echo -ne "\n\n"
+		while true; do
+			read -r -p "Выполните следующие шаги:
+	1. Скопируйте публичный ssh ключ $HOME/.ssh/id_ed25519.pub
 	2. Вставьте его в Gitlab > Preferences > SSH Keys > Add new key
-	Но! При добавлении нового ключа отчистите поле Expiration date
-	3. Для продолжения введите команду done : " continue
-
-				if [ "$continue" = "done" ]; then
-					break
-				fi
-			done
-
-			break
-		elif [ "$generate_ssh" = "n" ]; then
-			break
-		fi
-	done
+	Но! При добавлении нового ключа очистите поле Expiration date
+	3. Для продолжения введите команду done : " ssh_done
+			[[ "$ssh_done" == "done" ]] && break
+		done
+	fi
 
 	git fetch origin
 	git sparse-checkout init --no-cone
@@ -87,19 +86,10 @@ log.txt
 }
 
 generate_scripts() {	
-	# Генерация скриптов
 	if [ -d "$work_dir"/scripts ]; then
-		while [ 1 ]
-		do
-			read -p "Обновить скрипты? (y/n) " answer
-			if [ "$answer" = "n" ]; then
-				return 0
-			elif [ "$answer" = "y" ]; then
-				break
-			fi
-		done
+		ask_yn "Обновить скрипты? (y/n)" || return 0
 	else
-		mkdir "$work_dir"/scripts
+		mkdir -p "$work_dir"/scripts
 	fi
 	
 	rm -f ./.git/info/proc_id
@@ -119,30 +109,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function find_repo_root([string] $start) {
-    $dir = Get-Item -LiteralPath $start
-    while ($null -ne $dir) {
-        if ($dir.Name -eq ".git") {
-            return $dir.Parent.FullName
-        }
-
-        $gitMeta = Join-Path $dir.FullName ".git"
-        $full = $dir.FullName
-        $insideDotGit = $full -match "[\\/]\.git([\\/]|$)"
-        if (-not $insideDotGit -and (Test-Path -LiteralPath $gitMeta)) {
-            return $full
-        }
-
-        $dir = $dir.Parent
-    }
-    return $null
-}
-
-$root = find_repo_root $PSScriptRoot
-if (-not $root) {
-    Write-Error "Cannot find git repository root from $PSScriptRoot"
-    exit 1
-}
+# Always installed as .git/hooks/sparse_daemon.ps1
+$root = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 Set-Location -LiteralPath $root
 
 $src_root = "src"
@@ -158,16 +126,15 @@ $log_file = Join-Path $root "log.txt"
 $latency_ms = 1000
 $suppress_sec = 1.0
 
-# Shared with FileSystemWatcher event runspaces
-$state = [hashtable]::Synchronized(@{
+$state = @{
     last_token     = ""
     last_branch    = ""
     last_head      = ""
     last_disk_sig  = ""
     suppress_until = [datetime]::MinValue
-    pending        = $true
+    pending        = $false
     do_log         = [bool]$log
-})
+}
 
 function log([string] $message) {
     if (-not $state.do_log) { return }
@@ -205,11 +172,29 @@ function to_sparse_pattern([string] $path) {
 
 function invoke_git {
     param([Parameter(ValueFromRemainingArguments = $true)][string[]] $git_args)
-    $out = & git -C $root @git_args 2>&1
+    $out = & git -C $root @git_args 2>$null
     return [pscustomobject]@{
         exit_code = $LASTEXITCODE
         output    = @($out | ForEach-Object { "$_" }) -join "`n"
     }
+}
+
+function invoke_git_stdin([string] $arguments, [string] $text) {
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = "git"
+    $psi.Arguments = "-C `"$root`" $arguments"
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $proc.StandardInput.Write($text)
+    $proc.StandardInput.Close()
+    $stdout = $proc.StandardOutput.ReadToEnd()
+    $null = $proc.StandardError.ReadToEnd()
+    $proc.WaitForExit()
+    return $stdout
 }
 
 function test_git_busy {
@@ -269,22 +254,7 @@ function get_src_files {
     if ($all.Count -eq 0) { return @() }
 
     $ignored = New-Object System.Collections.Generic.HashSet[string]
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "git"
-    $psi.Arguments = "-C `"$root`" check-ignore --stdin"
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    foreach ($rel in $all) {
-        $proc.StandardInput.WriteLine($rel)
-    }
-    $proc.StandardInput.Close()
-    $out = $proc.StandardOutput.ReadToEnd()
-    $null = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
+    $out = invoke_git_stdin "check-ignore --stdin" (($all -join "`n") + "`n")
     foreach ($line in ($out -split "`r?`n")) {
         $line = convert_to_posix ($line.Trim())
         if ($line) { [void]$ignored.Add($line) }
@@ -313,21 +283,7 @@ function get_sha256([string] $text) {
 function set_sparse_checkout([string[]] $files) {
     $cleaned_files = @($files | Where-Object { $_ -and -not [string]::IsNullOrWhiteSpace($_) })
     $payload = @("null") + $cleaned_files
-    $text = ($payload -join "`n") + "`n"
-    
-    $psi = New-Object System.Diagnostics.ProcessStartInfo
-    $psi.FileName = "git"
-    $psi.Arguments = "-C `"$root`" sparse-checkout set --stdin"
-    $psi.RedirectStandardInput = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    
-    $proc = [System.Diagnostics.Process]::Start($psi)
-    $proc.StandardInput.Write($text)
-    $proc.StandardInput.Close()
-    $proc.WaitForExit()
+    $null = invoke_git_stdin "sparse-checkout set --stdin" (($payload -join "`n") + "`n")
 }
 
 function test_pid_alive([int] $process_id) {
@@ -498,10 +454,7 @@ try {
                 $name = $evt.SourceEventArgs.Name
 				log "--> $name"
                 if ($name) {
-                    $ext = [System.IO.Path]::GetExtension($name)
-					
-                    # Фильтрация временных файлов и логов
-                    if (-not $skip_files.Contains([System.IO.Path]::GetFileName($name)) -and 
+                    if (-not $skip_files.Contains([System.IO.Path]::GetFileName($name)) -and
                         $name -notlike "~*") {
                         $state.pending = $true
                     }
@@ -613,32 +566,29 @@ get_status() {
 }
 
 wait_gone() {
-    local pid=$1
-    local n=$2
-    local i
+    local pid=$1 n=$2 i
     for i in $(seq 1 "$n"); do
         pid_alive "$pid" || return 0
         sleep 0.2
     done
-    pid_alive "$pid" && return 1
-    return 0
+    ! pid_alive "$pid"
 }
 
 kill_pid() {
-    local pid=$1
-    local force=$2
+    local pid=$1 force=$2
     if [[ "$force" != "1" ]]; then
         kill -TERM "$pid" 2>/dev/null && return 0
-        if command -v taskkill.exe >/dev/null 2>&1; then
-            taskkill.exe //PID "$pid" >/dev/null 2>&1 && return 0
-        fi
-        return 1
+        command -v taskkill.exe >/dev/null 2>&1 && taskkill.exe //PID "$pid" >/dev/null 2>&1
+        return $?
     fi
     kill -KILL "$pid" 2>/dev/null && return 0
-    if command -v taskkill.exe >/dev/null 2>&1; then
-        taskkill.exe //PID "$pid" //T //F >/dev/null 2>&1 && return 0
-    fi
-    return 1
+    command -v taskkill.exe >/dev/null 2>&1 && taskkill.exe //PID "$pid" //T //F >/dev/null 2>&1
+    return $?
+}
+
+mark_stopped() {
+    echo "Process $1 stopped"
+    rm -f "$PID_FILE" "$STOP_FILE"
 }
 
 stop_daemon() {
@@ -649,29 +599,14 @@ stop_daemon() {
         return 0
     fi
 
-    # 1) Ask the daemon to exit the loop so finally disposes FileSystemWatcher
     : > "$STOP_FILE"
-    if wait_gone "$pid" 25; then
-        echo "Process $pid stopped"
-        rm -f "$PID_FILE" "$STOP_FILE"
-        return 0
-    fi
+    wait_gone "$pid" 25 && { mark_stopped "$pid"; return 0; }
 
-    # 2) SIGTERM / taskkill without /F
     kill_pid "$pid" 0
-    if wait_gone "$pid" 15; then
-        echo "Process $pid stopped"
-        rm -f "$PID_FILE" "$STOP_FILE"
-        return 0
-    fi
+    wait_gone "$pid" 15 && { mark_stopped "$pid"; return 0; }
 
-    # 3) SIGKILL / taskkill /T /F (process tree)
     kill_pid "$pid" 1
-    if wait_gone "$pid" 10; then
-        echo "Process $pid stopped"
-        rm -f "$PID_FILE" "$STOP_FILE"
-        return 0
-    fi
+    wait_gone "$pid" 10 && { mark_stopped "$pid"; return 0; }
 
     echo "Failed to stop process $pid"
     return 1
@@ -769,6 +704,7 @@ while true; do
     run_option "$option"
 done
 ' > ./scripts/sparse.sh
+	chmod +x ./scripts/sparse.sh ./scripts/console.sh
 
 	echo "Скрипты обновлены"
 }
@@ -779,16 +715,6 @@ echo "------------------------------------------------"
 generate_scripts
 echo "------------------------------------------------"
 
-while [ 1 ]
-do
-	read -p "Удалить init.sh? (y/n) " to_delete
-
-	if [ "$to_delete" = "y" ]; then
-		rm ./init.sh
-		break
-	elif [ "$to_delete" = "n" ]; then
-		break
-	else
-		echo "Пожалуйста, введите y или n:"
-	fi
-done
+if ask_yn "Удалить init.sh? (y/n)"; then
+	rm -f ./init.sh
+fi
