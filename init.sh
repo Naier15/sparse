@@ -3,7 +3,7 @@ work_dir=$(pwd)
 git config --global fetch.prune true
 git config --global alias.sc 'sparse-checkout'
 git config --global alias.lg 'log --all --graph --oneline'
-git config --global alias.spa '!f() { case "$1" in "run") ./scripts/sparse.sh 1 ;; "stop") ./scripts/sparse.sh 3 ;; "") ./scripts/sparse.sh 2 ;; *) echo "Wrong parameter: $1" ;; esac }; f'
+git config --global alias.spa '!f() { case "$1" in "run") if [ "$2" = "-l" ] || [ "$2" = "--log" ]; then ./scripts/sparse.sh 0; else ./scripts/sparse.sh 1; fi ;; "stop") ./scripts/sparse.sh 3 ;; "") ./scripts/sparse.sh 2 ;; *) echo "Wrong parameter: $1" ;; esac }; f'
 
 ask_yn() {
 	local answer
